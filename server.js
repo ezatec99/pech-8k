@@ -32,16 +32,63 @@ if (process.env.YTDLP_COOKIES_B64) {
 }
 
 /* ---------- helpers ---------- */
-function baseArgs('--extractor-args', 'youtube:player_client=default,web_safari',
-) {
-  const a = [
-    '--no-playlist', '--no-warnings', '--no-cache-dir',
-    '--socket-timeout', '20', '--retries', '3',
+/* ===== COOKIE SETUP ===== */
+/* បើ fs/os/path មាន require ខាងលើរួចហើយ សូមលុប require ទ្វេចេញ (duplicate នឹង error) */
+const fs   = require('fs');
+const os   = require('os');
+const path = require('path');
+
+let COOKIE_FILE = null;
+
+(function initCookies() {
+  // 1) Render Secret File (ក្រោយពេលបងបង្កើត /etc/secrets/cookies.txt)
+  const secret = process.env.YTDLP_COOKIES_FILE;
+  if (secret && fs.existsSync(secret)) {
+    COOKIE_FILE = secret;
+    console.log('🍪 Cookies: loaded from secret file ->', secret);
+    return;
+  }
+  // 2) Env var base64 (YTDLP_COOKIES_B64)
+  const b64 = process.env.YTDLP_COOKIES_B64;
+  if (b64 && b64.trim().length > 0) {
+    try {
+      const p = path.join(os.tmpdir(), 'pech-cookies.txt');
+      fs.writeFileSync(p, Buffer.from(b64.replace(/\s+/g, ''), 'base64'));
+      COOKIE_FILE = p;
+      console.log('🍪 Cookies: loaded from YTDLP_COOKIES_B64');
+    } catch (e) {
+      console.error('🍪 Cookie write failed:', e.message);
+    }
+  }
+  if (!COOKIE_FILE) console.log('🍪 Cookies: NONE (yt-dlp អាចជួប bot check)');
+})();
+
+/* ===== yt-dlp base args ===== */
+function baseArgs() {
+  const args = [
+    '--no-playlist',
+    '--no-warnings',
+    '--no-cache-dir',
+    '--socket-timeout', '20',
+    '--retries', '3',
   ];
-  if (COOKIE_FILE) a.push('--cookies', COOKIE_FILE);
-  if (FFMPEG)      a.push('--ffmpeg-location', FFMPEG);
-  return a;
+
+  // ✅ ត្រូវដាក់ក្នុង array បែបនេះ មិនមែនក្នុង function(...) ទេ
+  args.push(
+    '--extractor-args',
+    'youtube:player_client=' + (process.env.YTDLP_PLAYER_CLIENT || 'default,web_safari')
+  );
+
+  if (COOKIE_FILE) {
+    args.push('--cookies', COOKIE_FILE);
+  }
+  if (process.env.FFMPEG_LOCATION) {
+    args.push('--ffmpeg-location', process.env.FFMPEG_LOCATION);
+  }
+
+  return args;
 }
+
 
 function runYtdlp(extra = [], timeoutMs = 60000) {
   return new Promise((resolve) => {
