@@ -32,7 +32,8 @@ if (process.env.YTDLP_COOKIES_B64) {
 }
 
 /* ---------- helpers ---------- */
-function baseArgs() {
+function baseArgs('--extractor-args', 'youtube:player_client=default,web_safari',
+) {
   const a = [
     '--no-playlist', '--no-warnings', '--no-cache-dir',
     '--socket-timeout', '20', '--retries', '3',
