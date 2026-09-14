@@ -120,10 +120,12 @@ function baseArgs() {
     '--retries', '3',
   ];
 
-  const clients = process.env.YTDLP_PLAYER_CLIENT || 'default,web_safari';
-  args.push('--extractor-args', 'youtube:player_client=' + clients);
+  // 🎯 hardcoded: local testing proved mweb works, tv+cookies fails
+  args.push('--extractor-args', 'youtube:player_client=mweb');
 
-  if (COOKIE_FILE) args.push('--cookies', COOKIE_FILE);
+  // cookies disabled on purpose (they break every client)
+  // if (COOKIE_FILE) args.push('--cookies', COOKIE_FILE);
+
   if (process.env.FFMPEG_LOCATION) args.push('--ffmpeg-location', process.env.FFMPEG_LOCATION);
 
   return args;
@@ -173,8 +175,9 @@ app.get('/api/health', (req, res) => {
     status: 'ok',
     time: new Date().toISOString(),
     ytdlp: YTDLP_VERSION,
-    cookies: !!COOKIE_FILE,
-    player_client: process.env.YTDLP_PLAYER_CLIENT || 'default,web_safari',
+    cookies: false,
+    player_client: 'mweb',
+
   });
 });
 
