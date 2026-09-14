@@ -4,7 +4,8 @@ let pechStop = false;
 
 function setProgress(pct, text) {
   const fill = $('pechProgressFill');
-  const txt  = $('pechProgressText');
+var API_BASE = 'https://bikini-architectural-concert-calling.trycloudflare.com';
+
   if (fill) fill.style.width = (pct == null ? 30 : Math.max(0, Math.min(100, pct))) + '%';
   if (txt)  txt.textContent = text || '';
 }
