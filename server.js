@@ -1,6 +1,3 @@
-/* =========================================================
-   PECH-TOOL API  •  server.js  (Express + CORS + yt-dlp)
-   ========================================================= */
 'use strict';
 
 const express = require('express');
@@ -8,49 +5,32 @@ const cors    = require('cors');
 const fs      = require('fs');
 const os      = require('os');
 const path    = require('path');
-const crypto  = require('crypto');
 const { spawn } = require('child_process');
+const { Readable } = require('stream');
 
 const app  = express();
 const PORT = process.env.PORT || 10000;
-
-const YTDLP  = process.env.YTDLP_BIN  || 'yt-dlp';
-const FFMPEG = process.env.FFMPEG_BIN || '';   // '' = auto
+const YTDLP = process.env.YTDLP_BIN || 'yt-dlp';
 
 app.use(cors());
 app.use(express.json({ limit: '2mb' }));
 
-/* ---------- cookies (ស្រេចចិត្ត — មើលចំណុចខាងក្រោម) ---------- */
-let COOKIE_FILE = null;
-if (process.env.YTDLP_COOKIES_B64) {
-  try {
-    COOKIE_FILE = path.join(os.tmpdir(), 'pech-cookies.txt');
-    fs.writeFileSync(COOKIE_FILE,
-      Buffer.from(process.env.YTDLP_COOKIES_B64, 'base64').toString('utf8'));
-    console.log('[boot] cookies loaded');
-  } catch (e) { console.error('[boot] cookie fail:', e.message); }
-}
-
-/* ---------- helpers ---------- */
-/* ===== COOKIE SETUP ===== */
-/* បើ fs/os/path មាន require ខាងលើរួចហើយ សូមលុប require ទ្វេចេញ (duplicate នឹង error) */
-const fs   = require('fs');
-const os   = require('os');
-const path = require('path');
-
+/* =========================================================
+   1) COOKIES  ->  YTDLP_COOKIES_B64  ឬ  YTDLP_COOKIES_FILE
+   ========================================================= */
 let COOKIE_FILE = null;
 
 (function initCookies() {
-  // 1) Render Secret File (ក្រោយពេលបងបង្កើត /etc/secrets/cookies.txt)
+  // (A) Render Secret File  (ឧ. /etc/secrets/cookies.txt)
   const secret = process.env.YTDLP_COOKIES_FILE;
   if (secret && fs.existsSync(secret)) {
     COOKIE_FILE = secret;
     console.log('🍪 Cookies: loaded from secret file ->', secret);
     return;
   }
-  // 2) Env var base64 (YTDLP_COOKIES_B64)
+  // (B) Env var base64
   const b64 = process.env.YTDLP_COOKIES_B64;
-  if (b64 && b64.trim().length > 0) {
+  if (b64 && b64.trim()) {
     try {
       const p = path.join(os.tmpdir(), 'pech-cookies.txt');
       fs.writeFileSync(p, Buffer.from(b64.replace(/\s+/g, ''), 'base64'));
@@ -63,7 +43,21 @@ let COOKIE_FILE = null;
   if (!COOKIE_FILE) console.log('🍪 Cookies: NONE (yt-dlp អាចជួប bot check)');
 })();
 
-/* ===== yt-dlp base args ===== */
+/* =========================================================
+   2) yt-dlp version (សម្រាប់ /api/health)
+   ========================================================= */
+let YTDLP_VERSION = 'unknown';
+(function loadVersion() {
+  const p = spawn(YTDLP, ['--version']);
+  let out = '';
+  p.stdout.on('data', d => { out += d.toString(); });
+  p.on('close', () => { YTDLP_VERSION = out.trim() || 'unknown'; console.log('🎬 yt-dlp', YTDLP_VERSION); });
+  p.on('error', () => { YTDLP_VERSION = 'not-found'; });
+})();
+
+/* =========================================================
+   3) base args  (✅ array មិនមែន function parameter)
+   ========================================================= */
 function baseArgs() {
   const args = [
     '--no-playlist',
@@ -73,173 +67,209 @@ function baseArgs() {
     '--retries', '3',
   ];
 
-  // ✅ ត្រូវដាក់ក្នុង array បែបនេះ មិនមែនក្នុង function(...) ទេ
-  args.push(
-    '--extractor-args',
-    'youtube:player_client=' + (process.env.YTDLP_PLAYER_CLIENT || 'default,web_safari')
-  );
+  const clients = process.env.YTDLP_PLAYER_CLIENT || 'default,web_safari';
+  args.push('--extractor-args', 'youtube:player_client=' + clients);
 
-  if (COOKIE_FILE) {
-    args.push('--cookies', COOKIE_FILE);
-  }
-  if (process.env.FFMPEG_LOCATION) {
-    args.push('--ffmpeg-location', process.env.FFMPEG_LOCATION);
-  }
+  if (COOKIE_FILE) args.push('--cookies', COOKIE_FILE);
+  if (process.env.FFMPEG_LOCATION) args.push('--ffmpeg-location', process.env.FFMPEG_LOCATION);
 
   return args;
 }
 
+/* =========================================================
+   4) runYtdlp + serialize (រត់ម្ដងមួយដើម្បីការពារ RAM)
+   ========================================================= */
+function runYtdlp(extraArgs, timeoutMs = 120000) {
+  return new Promise((resolve, reject) => {
+    const args  = baseArgs().concat(extraArgs);
+    const child = spawn(YTDLP, args, { windowsHide: true });
+    let stdout = '', stderr = '', done = false;
 
-function runYtdlp(extra = [], timeoutMs = 60000) {
-  return new Promise((resolve) => {
-    const p = spawn(YTDLP, [...baseArgs(), ...extra]);
-    let out = '', err = '';
-    const t = setTimeout(() => { try { p.kill('SIGKILL'); } catch {} }, timeoutMs);
-    p.stdout.on('data', d => out += d.toString());
-    p.stderr.on('data', d => err += d.toString());
-    p.on('error', e => { clearTimeout(t); resolve({ code: -1, stdout: out, stderr: err + '\n' + e.message }); });
-    p.on('close', c => { clearTimeout(t); resolve({ code: c, stdout: out, stderr: err }); });
-  });
-}
+    const timer = setTimeout(() => {
+      if (done) return;
+      done = true;
+      try { child.kill('SIGKILL'); } catch (_) {}
+      reject(new Error('yt-dlp timeout after ' + timeoutMs + ' ms'));
+    }, timeoutMs);
 
-/* រត់ทีละដំណើរការ (កាត់បន្ថយ RAM) */
-let chain = Promise.resolve();
-function serialize(task) {
-  const r = chain.then(task, task);
-  chain = r.then(() => {}, () => {});
-  return r;
-}
-
-function rmDir(dir) { try { fs.rmSync(dir, { recursive: true, force: true }); } catch {} }
-
-/* =======================  ENDPOINTS  ======================= */
-
-/* 1) health */
-app.get('/api/health', async (req, res) => {
-  const v = await runYtdlp(['--version'], 15000);
-  res.json({
-    status : 'ok',
-    time   : new Date().toISOString(),
-    ytdlp  : v.code === 0 ? v.stdout.trim() : 'NOT INSTALLED',
-    cookies: !!COOKIE_FILE,
-  });
-});
-
-/* 2) extract links ពី text */
-const URL_RE = /https?:\/\/[^\s<>"'\)\]]+/gi;
-app.post('/api/extract', (req, res) => {
-  const text = String((req.body && (req.body.text || req.body.input || req.body.urls)) || '');
-  const found = text.match(URL_RE) || [];
-  const links = [...new Set(found.map(u => u.replace(/[.,;]+$/, '')))];
-  res.json({ count: links.length, links });
-});
-
-/* 3) proxy — សម្រាប់ File ផ្ទាល់ (.mp4/.jpg/...) */
-app.get('/api/proxy', async (req, res) => {
-  const target = req.query.url;
-  if (!target) return res.status(400).json({ error: 'missing url' });
-  try {
-    const r = await fetch(target, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36',
-        'Referer': new URL(target).origin,
-      },
+    child.stdout.on('data', d => { stdout += d.toString(); });
+    child.stderr.on('data', d => { stderr += d.toString(); });
+    child.on('error', err => {
+      if (done) return; done = true; clearTimeout(timer);
+      reject(err);
     });
-    if (!r.ok) return res.status(502).json({ error: 'upstream ' + r.status });
+    child.on('close', code => {
+      if (done) return; done = true; clearTimeout(timer);
+      resolve({ code, stdout, stderr });
+    });
+  });
+}
 
-    const ct  = r.headers.get('content-type') || 'application/octet-stream';
-    const len = r.headers.get('content-length');
-    const nm  = path.basename(new URL(target).pathname) || 'file';
+let _chain = Promise.resolve();
+function serialize(task) {
+  const run = _chain.then(task, task);
+  _chain = run.catch(() => {});
+  return run;
+}
 
-    res.setHeader('Content-Type', ct);
-    if (len) res.setHeader('Content-Length', len);
-    res.setHeader('Content-Disposition', `attachment; filename="${nm.replace(/["\\]/g, '_')}"`);
-    res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition, Content-Length');
-    res.end(Buffer.from(await r.arrayBuffer()));
-  } catch (e) { res.status(500).json({ error: e.message }); }
+/* =========================================================
+   5) /api/health
+   ========================================================= */
+app.get('/api/health', (req, res) => {
+  res.json({
+    status: 'ok',
+    time: new Date().toISOString(),
+    ytdlp: YTDLP_VERSION,
+    cookies: !!COOKIE_FILE,
+    player_client: process.env.YTDLP_PLAYER_CLIENT || 'default,web_safari',
+  });
 });
 
-/* 4) info — ចំណងជើង / រយៈពេល */
+/* =========================================================
+   6) /api/extract  (ដក link ចេញពី text)
+   ========================================================= */
+const PLATFORMS = [
+  ['youtube',   /(youtube\.com|youtu\.be)/i],
+  ['facebook',  /(facebook\.com|fb\.watch)/i],
+  ['tiktok',    /tiktok\.com/i],
+  ['instagram', /instagram\.com/i],
+  ['twitter',   /(twitter\.com|x\.com)/i],
+];
+
+function detectPlatform(u) {
+  for (const [name, re] of PLATFORMS) if (re.test(u)) return name;
+  return 'other';
+}
+
+app.post('/api/extract', (req, res) => {
+  const text = String((req.body && req.body.text) || '');
+  const found = text.match(/https?:\/\/[^\s"'<>)]+/g) || [];
+  const seen = new Set();
+  const items = [];
+  for (let u of found) {
+    u = u.replace(/[.,;!?]+$/, '');
+    if (seen.has(u)) continue;
+    seen.add(u);
+    items.push({ url: u, platform: detectPlatform(u) });
+  }
+  res.json({ count: items.length, items });
+});
+
+/* =========================================================
+   7) /api/info
+   ========================================================= */
 app.get('/api/info', async (req, res) => {
   const url = req.query.url;
   if (!url) return res.status(400).json({ error: 'missing url' });
-  const { code, stdout, stderr } = await serialize(() => runYtdlp(['-J', url], 90000));
-  if (code !== 0) return res.status(500).json({ error: 'extract failed', detail: stderr.slice(-900) });
   try {
-    const j = JSON.parse(stdout);
+    const r = await serialize(() => runYtdlp(['-J', url], 60000));
+    if (r.code !== 0) {
+      return res.status(500).json({ error: 'yt-dlp failed', detail: r.stderr.slice(-800) });
+    }
+    const line = r.stdout.trim().split('\n').filter(Boolean).pop();
+    const j = JSON.parse(line);
     res.json({
-      ok: true,
       title: j.title,
       uploader: j.uploader || j.channel,
       duration: j.duration,
       thumbnail: j.thumbnail,
       webpage_url: j.webpage_url,
+      platform: detectPlatform(url),
     });
-  } catch { res.status(500).json({ error: 'bad json' }); }
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
-/* 5) ★ download — ទាញយកពិត ★ */
+/* =========================================================
+   8) /api/proxy  (stream file ตรง ๆ)
+   ========================================================= */
+app.get('/api/proxy', async (req, res) => {
+  const target = req.query.url;
+  if (!target) return res.status(400).json({ error: 'missing url' });
+  try {
+    const r = await fetch(target, {
+      headers: { 'user-agent': 'Mozilla/5.0', 'accept': '*/*' },
+    });
+    res.status(r.status);
+    for (const h of ['content-type', 'content-length', 'content-disposition', 'accept-ranges']) {
+      const v = r.headers.get(h);
+      if (v) res.setHeader(h, v);
+    }
+    if (!r.body) return res.end();
+    Readable.fromWeb(r.body).pipe(res);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+/* =========================================================
+   9) /api/download  (yt-dlp ពិត -> stream មក client)
+   ========================================================= */
 app.get('/api/download', async (req, res) => {
   const url  = req.query.url;
-  const mode = String(req.query.mode || 'video').toLowerCase();
-  const maxh = Math.min(Math.max(parseInt(req.query.maxh, 10) || 720, 144), 2160);
+  const mode = req.query.mode === 'audio' ? 'audio' : 'video';
+  let   maxh = parseInt(req.query.maxh, 10);
+  if (!Number.isFinite(maxh) || maxh < 144) maxh = 720;
 
   if (!url) return res.status(400).json({ error: 'missing url' });
 
-  const dir = path.join(os.tmpdir(), 'pech-' + crypto.randomUUID());
-  fs.mkdirSync(dir, { recursive: true });
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pech-'));
+  const tpl    = path.join(tmpDir, 'pech-media.%(ext)s');
 
-  const args = ['--newline', '-o', path.join(dir, '%(title).100B.%(ext)s'),
-                '--print', 'after_move:filepath', '--no-simulate'];
+  const fmt = mode === 'audio'
+    ? ['-f', 'ba/b', '-x', '--audio-format', 'mp3', '--audio-quality', '0']
+    : ['-f', `bv*[ext=mp4][height<=${maxh}]+ba[ext=m4a]/b[ext=mp4][height<=${maxh}]/b[ext=mp4]/b`,
+       '--merge-output-format', 'mp4'];
 
-  if (mode === 'audio') {
-    args.push('-x', '--audio-format', 'mp3', '--audio-quality', '0');
-  } else {
-    args.push('-f',
-      `bv*[ext=mp4][height<=${maxh}]+ba[ext=m4a]/b[ext=mp4][height<=${maxh}]/b[ext=mp4]/b`);
-    args.push('--merge-output-format', 'mp4');
+  const args = ['--no-simulate', '--print', 'after_move:filepath', '-o', tpl]
+    .concat(fmt, [url]);
+
+  const cleanup = () => {
+    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (_) {}
+  };
+  res.on('close', cleanup);
+
+  let result;
+  try {
+    result = await serialize(() => runYtdlp(args, 15 * 60 * 1000));
+  } catch (e) {
+    cleanup();
+    return res.status(500).json({ error: 'download failed', detail: e.message });
   }
-  args.push(url);
 
-  const { code, stdout, stderr } = await serialize(() => runYtdlp(args, 10 * 60 * 1000));
-
-  if (code !== 0) {
-    rmDir(dir);
-    return res.status(500).json({
-      error : 'yt-dlp failed',
-      detail: stderr.split('\n').filter(Boolean).slice(-6).join('\n') || 'unknown',
-    });
+  if (result.code !== 0) {
+    cleanup();
+    return res.status(500).json({ error: 'yt-dlp failed', detail: result.stderr.slice(-900) });
   }
 
-  let filePath = stdout.trim().split('\n').filter(Boolean).pop();
+  // រក file ដែលទាញរួច
+  let filePath = result.stdout.trim().split('\n').filter(Boolean).pop() || '';
   if (!filePath || !fs.existsSync(filePath)) {
-    const files = fs.readdirSync(dir)
-      .map(f => path.join(dir, f))
-      .filter(f => { try { return fs.statSync(f).isFile(); } catch { return false; } })
-      .sort((a, b) => fs.statSync(b).size - fs.statSync(a).size);
-    filePath = files[0];
-  }
-  if (!filePath || !fs.existsSync(filePath)) {
-    rmDir(dir);
-    return res.status(500).json({ error: 'file not found after download' });
+    const files = fs.readdirSync(tmpDir).filter(f => !f.endsWith('.part'));
+    if (!files.length) {
+      cleanup();
+      return res.status(500).json({ error: 'file not produced', detail: result.stderr.slice(-500) });
+    }
+    filePath = path.join(tmpDir, files[0]);
   }
 
-  const stat = fs.statSync(filePath);
-  const name = path.basename(filePath);
+  const fname = path.basename(filePath);
+  console.log('⬇️  sending', fname, '(' + fs.statSync(filePath).size + ' bytes)');
 
-  res.setHeader('Content-Type', mode === 'audio' ? 'audio/mpeg' : 'video/mp4');
-  res.setHeader('Content-Length', stat.size);
-  res.setHeader('Content-Disposition',
-    `attachment; filename="${name.replace(/["\\]/g, '_')}"; filename*=UTF-8''${encodeURIComponent(name)}`);
-  res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition, Content-Length, Content-Type');
-
-  const stream = fs.createReadStream(filePath);
-  res.on('close', () => rmDir(dir));
-  stream.on('error', () => { rmDir(dir); res.destroy(); });
-  stream.pipe(res);
+  res.download(filePath, fname, err => {
+    if (err) console.error('send error:', err.message);
+    cleanup();
+  });
 });
 
-/* 6) root */
-app.get('/', (req, res) => res.json({ name: 'pech-tool-api', ok: true }));
+/* =========================================================
+   10) root
+   ========================================================= */
+app.get('/', (req, res) => {
+  res.type('text/plain').send('PECH-TOOL API is running. Try /api/health');
+});
 
-app.listen(PORT, '0.0.0.0', () => console.log('PECH-TOOL API on port ' + PORT));
+app.listen(PORT, '0.0.0.0', () => {
+  console.log('PECH-TOOL API on port ' + PORT);
+});
