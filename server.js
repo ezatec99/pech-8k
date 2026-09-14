@@ -18,28 +18,81 @@ app.use(express.json({ limit: '2mb' }));
 /* =========================================================
    1) COOKIES  ->  YTDLP_COOKIES_B64  ឬ  YTDLP_COOKIES_FILE
    ========================================================= */
+/* =========================================================
+   1) COOKIES  ->  YTDLP_COOKIES_B64  ឬ  YTDLP_COOKIES_FILE
+   (ស្គាល់ទាំង Netscape និង JSON — បំប្លែងដោយស្វ័យប្រវត្តិ)
+   ========================================================= */
+
+// បំប្លែង JSON (Cookie-Editor / EditThisCookie ...) -> Netscape
+function toNetscape(jsonText) {
+  let arr;
+  try { arr = JSON.parse(jsonText); } catch (_) { return null; }
+  if (!Array.isArray(arr)) {
+    if (arr && Array.isArray(arr.cookies)) arr = arr.cookies;
+    else return null;
+  }
+  const lines = ['# Netscape HTTP Cookie File', '# Converted by PECH server'];
+  for (const c of arr) {
+    const domain = c.domain || c.host || '';
+    const name   = c.name   || '';
+    const value  = c.value  || '';
+    if (!domain || !name) continue;
+    const includeSub = domain.startsWith('.') ? 'TRUE' : 'FALSE';
+    const cpath      = c.path || '/';
+    const secure     = c.secure ? 'TRUE' : 'FALSE';
+    let exp = Number(c.expirationDate || c.expires || 0);
+    if (!Number.isFinite(exp) || exp <= 0) exp = Math.floor(Date.now() / 1000) + 60 * 60 * 24 * 365;
+    exp = Math.floor(exp);
+    lines.push([domain, includeSub, cpath, secure, exp, name, value].join('\t'));
+  }
+  const out = lines.join('\n') + '\n';
+  console.log('🍪 Converted ' + (lines.length - 2) + ' JSON cookies -> Netscape');
+  return out;
+}
+
 let COOKIE_FILE = null;
 
 (function initCookies() {
-  // (A) Render Secret File  (ឧ. /etc/secrets/cookies.txt)
+  // (A) Render Secret File
   const secret = process.env.YTDLP_COOKIES_FILE;
   if (secret && fs.existsSync(secret)) {
     COOKIE_FILE = secret;
     console.log('🍪 Cookies: loaded from secret file ->', secret);
     return;
   }
+
   // (B) Env var base64
   const b64 = process.env.YTDLP_COOKIES_B64;
   if (b64 && b64.trim()) {
     try {
+      let text = Buffer.from(b64.replace(/\s+/g, ''), 'base64').toString('utf8');
+      text = text.replace(/^\uFEFF/, '');          // លុប BOM
+      const trimmed = text.trim();
+
+      let out = text;
+      if (trimmed.startsWith('#')) {
+        console.log('🍪 Cookies: Netscape format detected');
+      } else if (trimmed.startsWith('[') || trimmed.startsWith('{')) {
+        const conv = toNetscape(trimmed);
+        if (conv) out = conv;
+        else console.log('🍪 Cookies: JSON parse failed — using raw');
+      } else {
+        console.log('🍪 Cookies: unknown format — using raw');
+      }
+
       const p = path.join(os.tmpdir(), 'pech-cookies.txt');
-      fs.writeFileSync(p, Buffer.from(b64.replace(/\s+/g, ''), 'base64'));
+      fs.writeFileSync(p, out);
       COOKIE_FILE = p;
-      console.log('🍪 Cookies: loaded from YTDLP_COOKIES_B64');
+
+      // ជួយ debug៖ បង្ហាញជួរទី១ ៗ ប៉ុណ្ណោះ (មិនលេចខ្លឹមសារ cookie)
+      const firstLine = out.split('\n')[0].slice(0, 60);
+      const lineCount = out.split('\n').filter(Boolean).length;
+      console.log('🍪 Cookie file: "' + firstLine + '" (' + lineCount + ' lines)');
     } catch (e) {
       console.error('🍪 Cookie write failed:', e.message);
     }
   }
+
   if (!COOKIE_FILE) console.log('🍪 Cookies: NONE (yt-dlp អាចជួប bot check)');
 })();
 
