@@ -7,6 +7,29 @@ const os      = require('os');
 const path    = require('path');
 const { spawn } = require('child_process');
 const { Readable } = require('stream');
+/* ===== TEMP DIAG: test many player_clients at once (remove later) ===== */
+app.get('/api/diag', async (req, res) => {
+  const url = req.query.url || 'https://www.youtube.com/watch?v=dQw4w9WgXcQ';
+  const list = (req.query.clients || 'mweb,web,android_vr,tv_embedded').split(',');
+  const FMT = 'bv*[ext=mp4][height<=720]+ba[ext=m4a]/b[ext=mp4][height<=720]/b[ext=mp4]/b';
+  const results = [];
+  for (const c of list) {
+    try {
+      const r = await serialize(() => runYtdlp([
+        '--simulate', '-f', FMT,
+        '--extractor-args', 'youtube:player_client=' + c,
+        '--print', '%(title)s',
+        url,
+      ], 40000));
+      const first = r.stdout.trim().split('\n').filter(Boolean).pop() || '';
+      const err   = r.stderr.trim().split('\n').filter(Boolean).pop() || '';
+      results.push({ client: c, exit: r.code, ok: r.code === 0, title: first.slice(0, 60), err: err.slice(0, 150) });
+    } catch (e) {
+      results.push({ client: c, exit: -1, ok: false, err: ('timeout/' + e.message).slice(0, 150) });
+    }
+  }
+  res.json({ url, results });
+});
 
 const app  = express();
 const PORT = process.env.PORT || 10000;
