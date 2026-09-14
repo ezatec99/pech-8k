@@ -142,6 +142,7 @@ function baseArgs() {
     '--socket-timeout', '20',
     '--retries', '3',
   ];
+  if (process.env.YTDLP_PROXY) args.push('--proxy', process.env.YTDLP_PROXY);
 
   // 🎯 hardcoded: local testing proved mweb works, tv+cookies fails
   args.push('--extractor-args', 'youtube:player_client=mweb');
